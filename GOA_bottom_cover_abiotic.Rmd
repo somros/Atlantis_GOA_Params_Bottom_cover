@@ -1,0 +1,213 @@
+---
+title: "Abiotic cover GOA"
+author: "Alberto Rovellini"
+date: "8/5/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This document reads in the substrate type data shared by Bob McCounnaghey (NOAA) and maps the categories to the Atlantis substrate types (REEF, FLAT, SOFT). This data is a custom product of the dbSEABED database. The classification of sediment into sediment types is based on grain size and follows the Folk classification. See [here](https://www.researchgate.net/publication/284511408_BGS_detailed_explanation_of_seabed_sediment_modified_folk_classification)
+for some details.
+
+We will wait for the Tech Memo from Bob for these GOA maps for a citation, until then more information can be found at the dbSEABED [website](https://instaar.colorado.edu/~jenkinsc/dbseabed/).
+
+__Note__: The Folk categories do not resolve large boulders and rocky substrate. Rock is often difficult to appropriately capture in these datasets, because the bottom is often deemed to be "rocky" when the grab sample comes back empty, but this could be due to a number of reasons other than the bottom actually being (Bob McCounnaghey pers. comm.). We may need more data to capture rocky bottom.
+
+```{r}
+library(raster)
+library(sf)
+library(tidyverse)
+library(rbgm)
+library(maps)
+library(mapdata)
+library(viridis)
+library(data.table)
+```
+
+Read in raster from the Geometry/Data folder.
+```{r}
+folk <- raster("C:/Users/Alberto Rovellini/Documents/GOA/GOA_geometry_11Nov2021/Data/substrates/goa_FOLKcoda1.tif")
+```
+
+Write a key to map codes to categories according to the Folke classification, as in picture below and reference therein ![Folke categories](Images/long_BGS_FOLK.png).
+```{r}
+code <- c(3,23,103,123,203,30,32,130,132,232,230,300,302,322,320)
+name <- c("M","sM","(g)M", "(g)sM", "gM", "S", "mS", "(g)S", "(g)mS", "gmS", "gS", "G", "mG", "msG", "sG")
+longname <- c("Mud", "Sandy mud", "Slightly gravelly mud", "Slightly gravelly sandy mud", "Gravelly mud", "Sand", "Muddy sand", "Slightly gravelly sand", "Slightly gravelly muddy sand", "Gravelly muddy sand", "Gravelly sand", "Gravel", "Muddy gravel", "Muddy sandy gravel", "Sandy gravel")
+
+folk_key <- data.frame(code,name,longname)
+```
+
+Now add the corresponding Atlantis categories. From the Puget Sound Atlantis model: "We associated each substrate type into one of three Atlantis seafloor habitat types: reef, which includes rocky and cobble substrates; soft, composed of sand and mud; and flat, defined by shell and gravel". We cannot do this as this way we will have no rocky substrate. For now, map gravel-dominated substrates to "reef", mud-dominated to "soft", and sand-dominated to "flat". We will probably have to get back to this.  From raster metadata: "FOLK codes summarize sediment textures in terms of percent mud, sand and gravel fractions. They do not refer to the rock presence at a site. Basically, as in ‘(slightly sandy) gravelly MUD’ the primary is capitalized, fractionally is lower case, and a slight fraction is in brackets".
+
+Reclassification takes a matrix, which needs to have all columns in the same format. Therefore, assign the Atlantis bottom types Soft, Flat and Reef to numbers 1, 2, 3.
+```{r}
+atlantis_class <- c("Soft","Soft","Soft","Soft","Soft","Sand","Sand","Sand","Sand","Sand","Sand","Reef","Reef","Reef","Reef")
+atlantis_code <- c(1,1,1,1,1,2,2,2,2,2,2,3,3,3,3)
+
+folk_key <- data.frame(folk_key,atlantis_class,atlantis_code)
+```
+
+Reclassify Folk codes to Atlantis substrate types.
+```{r}
+atlantis_bottom <- raster::reclassify(folk, rcl = as.matrix(folk_key %>% select(code,atlantis_code)))
+```
+
+Read in BGM and clip this raster to the BGM mask.
+```{r}
+atlantis_bgm <- read_bgm("GOA_WGS84_V4_final.bgm")
+atlantis_box <- box_sf(atlantis_bgm)
+atlantis_crs <- atlantis_bgm$extra$projection
+```
+
+```{r}
+atlantis_bottom <- atlantis_bottom %>% projectRaster(crs = atlantis_crs, method = "ngb")
+
+atlantis_bottom <- mask(atlantis_bottom,atlantis_box)
+```
+
+# Polygonization
+
+This may not be an option on slower systems.
+```{r}
+atlantis_box_bottom_pol <- atlantis_bottom %>% rasterToPolygons(n=4,dissolve=TRUE) %>%  st_as_sf(crs = atlantis_crs) %>%  set_names('bottom','geometry') %>% left_join(folk_key %>% select(atlantis_class,atlantis_code) %>% distinct(), by=c('bottom'='atlantis_code'))
+```
+
+View.
+```{r}
+coast <- maps::map("worldHires", c("USA","Canada"), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf() %>% st_transform(crs = atlantis_crs)
+
+bounds <- st_bbox(atlantis_box)
+
+ggplot()+
+  geom_sf(data = atlantis_box_bottom_pol, aes(fill=atlantis_class),size=.05)+
+  #geom_sf(data = atlantis_box, fill = NA)+
+  geom_sf(data = coast_sf)+
+  coord_sf(xlim=c(bounds$xmin,bounds$xmax),ylim=c(bounds$ymin,bounds$ymax))+
+  theme_minimal()+
+  labs(title = "Atlantis GOA bottom types")
+
+```
+
+Work out area coverage for each type in each Atlantis box. Then divide by box area to obtain a proportion, that hopefully should be more accurate than what we have with the point-wise overlay.
+```{r}
+box_substrate_overlap <- function(this_substrate,substrate_data,box_data){
+  
+  this_intersection <- box_data %>% st_intersection(substrate_data %>% filter(atlantis_class==this_substrate))
+  this_intersection <- this_intersection %>% 
+    mutate(substrate_box_area = st_area(this_intersection)) %>%
+    st_set_geometry(NULL) 
+  
+  return(this_intersection)
+}
+
+all_substrates <- folk_key %>% pull(atlantis_class) %>% unique()
+
+atlantis_substrates <- rbindlist(purrr::map(all_substrates,box_substrate_overlap,substrate_data=atlantis_box_bottom_pol,box_data=atlantis_box))
+```
+
+Interestingly, the results are basically identical to the 1-km method, which is encouraging for using it where the polygonization of the raster is not an option from a computational standpoint.
+
+# Filling the gaps based on depth strata
+
+Several boxes do not reach 1, because they fall outside of the spatial extent of the substrate data set. Write a function that:
+
+1. Expands to all combinations of box and substrate.
+2. Sets NA's that may result from point 1 to 0's
+3. Sets boundary boxes and island boxes to 0.
+4. For each box, including BC boxes, populates the missing area with proportion of each substrate in that depth stratum in the rest of the model domain.
+
+Note: this assumes that cover depends on depth, which is most likely not the case.
+```{r}
+# 1
+t <- atlantis_substrates %>% expand(atlantis_box %>% select(.bx0) %>% st_set_geometry(NULL),atlantis_class)
+t1 <- atlantis_box %>% left_join(t)
+
+atlantis_substrates_all <- t1 %>% 
+  left_join(atlantis_substrates %>% 
+              select(.bx0,atlantis_class,substrate_box_area), 
+            by = c('.bx0','atlantis_class'))
+
+#2.
+atlantis_substrates_all$substrate_box_area[is.na(atlantis_substrates_all$substrate_box_area)]<-0
+
+#3.
+atlantis_substrates_all$substrate_box_area[atlantis_substrates_all$botz==0 | atlantis_substrates_all$boundary==T]<-0
+
+#4.
+atlantis_substrates_all <- atlantis_substrates_all %>% group_by(.bx0) %>%
+  mutate(check = as.numeric(sum(substrate_box_area)/area)) %>%
+  ungroup()
+
+#5.
+# need to get total areas for each substrate at each depth stratum, then assign those proportion to the remainder of the area that is missing from each box.
+
+# build a matrix
+depth_layers <- c(0,30,100,200,500,1000,4000)
+# boundary boxes should not contribute to this because they have been zeroed. HOWEVER, at the end of this chunk they will need to be reset to 0 once more
+areas <- matrix(0,nrow = length(depth_layers)-1, ncol = length(all_substrates)) %>% data.frame() %>% set_names(all_substrates)
+ 
+for(i in 1:length(all_substrates)){
+  for(j in 1:(length(depth_layers)-1)){
+    
+    this_area <- atlantis_substrates_all %>% 
+      mutate(botz=-botz) %>%
+      filter(atlantis_class==all_substrates[i] & between(botz,depth_layers[j],depth_layers[j+1])) %>%
+      pull(substrate_box_area) %>% 
+      sum()
+    
+    areas[j,i] <- this_area
+  }
+}
+
+row.names(areas) <- depth_layers[-length(depth_layers)] # set row names to be the depth breaks
+
+# write a function that maps cover depending on depth and the rest of the model
+fill_with_cover <- function(this_box){
+  
+  t <- atlantis_substrates_all %>% filter(.bx0==this_box) %>% select(.bx0,botz,boundary,area,atlantis_class,substrate_box_area,check) %>%
+    mutate(botz=-botz)
+  
+  empty_area <- t$area*(1-t$check)
+  this_depth <- findInterval(t$botz[1],depth_layers)
+  
+  # proportions for the entire model domain
+  prop_at_depth <- (areas[this_depth,]/sum(areas[this_depth,])) %>% t() %>% data.frame() %>% rownames_to_column() %>% setnames(c('atlantis_class','global_prop_at_depth')) 
+  
+  t <- t %>% left_join(prop_at_depth, by = 'atlantis_class') %>%
+    mutate(remaining_area = global_prop_at_depth*area*(1-check),
+           total_area = as.numeric(substrate_box_area)+remaining_area,
+           cover = total_area/sum(total_area)) %>%
+    select(.bx0,botz,area,boundary,atlantis_class,cover) %>%
+    mutate(botz=-botz) %>%
+    st_set_geometry(NULL)
+  t
+}
+
+t2 <- rbindlist(purrr::map(0:108,fill_with_cover))
+
+# reset boundary boxes to 0
+t2$cover[t2$boundary==T | t2$botz==0]<-0
+```
+
+View.
+```{r}
+atlantis_box %>% left_join(t2, by = c('.bx0','boundary','botz')) %>%
+  ggplot()+
+  geom_sf(aes(fill=cover))+
+  scale_fill_viridis()+
+  geom_sf(data = coast_sf)+
+  coord_sf(xlim=c(bounds$xmin,bounds$xmax),ylim=c(bounds$ymin,bounds$ymax))+
+  facet_wrap(~atlantis_class,ncol=1)+
+  theme_minimal()
+```
+
+Write this out for use in other analyses.
+```{r}
+t2 %>% write.csv('abiotic_habitat.csv', row.names = FALSE)
+```
+

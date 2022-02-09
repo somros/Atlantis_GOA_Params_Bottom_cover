@@ -1,0 +1,402 @@
+---
+title: "Biotic cover GOA"
+author: "Alberto Rovellini"
+date: "7/27/2021"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(raster)
+library(rgdal)
+library(sf)
+library(maps)
+library(mapdata)
+library(rbgm)
+library(tidyverse)
+library(viridis)
+library(purrr)
+```
+
+
+This document opens raster of presence/absence and CPUE of benthic invertebrates provided by Chris Rooper (GOA and AI) and Jackson Chu (BC). It then calculates for each Atlantis box, the percentage cover of these invertebrates. This information will be used to estimate the coverage of biotic habitats in Atlantis GOA. This will require groups like corals, sponges, and other invertebrates to be specified with isCover=TRUE in Atlantis. 
+
+# GOA and AI
+
+The goal here is to go from presence/absence to percent cover in an Atlantis box. This is an approximation, but is the best we have. As per Chris's recommendations, we use cut-off values to turn the propbability of presence (which is what we have in the data) to presence/absence. The cut-off values are the following (Rooper pers. comm.):
+
+* AI – Sponge = 0.57
+* AI – Coral = 0.360
+* AI – Pennatulaceans = 0.05
+
+* GOA – Sponge = 0.40
+* GOA – Coral = 0.12
+* GOA – Pennatulaceans = 0.13
+
+A few notes:
+
+* This does not include British Columbia - we will need another data source for that.
+* Mapping presence to the Atlantis geometry and simply converting that to bottom cover of that benthic organism is equal to assuming presence=100% cover, which of course is not appropriate. However, we will use biomass (e.g. CPUE from this data or from bottom trawl) for the actual biomass parameterization. This is only for the purpose of scaling recruitment and refuge space (which is difficult to parameterize anyway, so this part will be tricky), so presence may be fine (also percentage cover is not available). 
+
+Open some data.
+```{r}
+goa_files <- list.files("Biotic/GOA_AI",full.names = TRUE)
+
+# drop the cpue files for now - deal with those in a different document
+goa_files <- goa_files[-grep("cpue",goa_files)]
+```
+
+We need to do this separate for each raster, then merge them together, then overlay the Atlantis geometry and get the area that is covered by this in each box. 
+
+Set everything to the CRS of the Atlantis BGM.
+```{r}
+atlantis_bgm <- read_bgm("GOA_WGS84_V4_final.bgm")
+atlantis_box <- atlantis_bgm %>% box_sf()
+atlantis_crs <- atlantis_bgm$extra$projection
+```
+
+## Sponges
+```{r}
+#GOA
+sponge_goa <- raster(goa_files[grep('sponge.*ENS.*grd',goa_files)])
+sponge_goa <- raster::aggregate(sponge_goa,fact=10)
+m <- c(0,0.40,NA, 0.40,1,1)
+rclmat <- matrix(m,nrow = 2,byrow = TRUE)
+sponge_goa_pa <- reclassify(sponge_goa,rclmat,)
+
+#AI
+sponge_ai <- raster(goa_files[grep('ai.*sponge.*grd',goa_files)])
+sponge_ai <- raster::aggregate(sponge_ai,fact=10)
+m <- c(0,0.57,NA, 0.57,1,1)
+rclmat <- matrix(m,nrow = 2,byrow = TRUE)
+sponge_ai_pa <- reclassify(sponge_ai,rclmat)
+
+#merge - need to make sure that goa and ai raster have the same origin
+origin(sponge_ai_pa) <- origin(sponge_goa_pa)
+sponge_atlantis <- raster::merge(sponge_goa_pa,sponge_ai_pa)
+
+#turn to polygon object
+sponge_atlantis_sf <- sponge_atlantis %>% rasterToPolygons(dissolve=TRUE) %>% st_as_sf(crs = crs(sponge_atlantis)@projargs) %>% st_transform(crs = atlantis_crs)
+```
+
+Plot
+```{r}
+coast <- maps::map("worldHires", c("USA","Canada"), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf() %>% st_transform(crs = atlantis_crs)
+
+bounds <- sponge_atlantis_sf %>% st_bbox()
+
+ggplot()+
+  geom_sf(data=sponge_atlantis_sf,fill="green")+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(bounds$xmin,bounds$xmax),ylim=c(bounds$ymin,bounds$ymax))+
+  theme_minimal()+
+  labs(title="Sponge presence")
+```
+The high presence of sponges will present the issue of going from presence to coverage. Check how we did it in the GBR, but assuming 100% sponge cover where sponges are "present" will not be viable. We may rescale it with CPUE somehow, although it becomes arbitrary at that point.
+
+## Corals
+```{r}
+#GOA
+coral_goa <- raster(goa_files[grep('coral.*ENS.*grd',goa_files)])
+coral_goa <- raster::aggregate(coral_goa,fact=10)
+m <- c(0,0.12,NA, 0.12,1,1)
+rclmat <- matrix(m,nrow = 2,byrow = TRUE)
+coral_goa_pa <- reclassify(coral_goa,rclmat,)
+
+#AI
+coral_ai <- raster(goa_files[grep('ai.*coral.*grd',goa_files)])
+coral_ai <- raster::aggregate(coral_ai,fact=10)
+m <- c(0,0.360,NA, 0.360,1,1)
+rclmat <- matrix(m,nrow = 2,byrow = TRUE)
+coral_ai_pa <- reclassify(coral_ai,rclmat)
+
+#merge - need to make sure that goa and ai raster have the same origin
+origin(coral_ai_pa) <- origin(coral_goa_pa)
+coral_atlantis <- raster::merge(coral_goa_pa,coral_ai_pa)
+
+#turn to polygon object
+coral_atlantis_sf <- coral_atlantis %>% rasterToPolygons(dissolve=TRUE) %>% st_as_sf(crs = crs(coral_atlantis)@projargs) %>% st_transform(crs = atlantis_crs)
+```
+
+Plot
+```{r}
+ggplot()+
+  geom_sf(data=coral_atlantis_sf,fill="green")+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(bounds$xmin,bounds$xmax),ylim=c(bounds$ymin,bounds$ymax))+
+  theme_minimal()+
+  labs(title="Coral presence")
+```
+
+## Sea whips
+
+```{r}
+#GOA
+whips_goa <- raster(goa_files[grep('whips.*ENS.*grd',goa_files)])
+whips_goa <- raster::aggregate(whips_goa,fact=10)
+m <- c(0,0.13,NA, 0.13,1,1)
+rclmat <- matrix(m,nrow = 2,byrow = TRUE)
+whips_goa_pa <- reclassify(whips_goa,rclmat,)
+
+#AI
+whips_ai <- raster(goa_files[grep('ai.*whips.*grd',goa_files)])
+whips_ai <- raster::aggregate(whips_ai,fact=10)
+m <- c(0,0.05,NA, 0.05,1,1)
+rclmat <- matrix(m,nrow = 2,byrow = TRUE)
+whips_ai_pa <- reclassify(whips_ai,rclmat)
+
+#merge - need to make sure that goa and ai raster have the same origin
+origin(whips_ai_pa) <- origin(whips_goa_pa)
+whips_atlantis <- raster::merge(whips_goa_pa,whips_ai_pa)
+
+#turn to polygon object
+whips_atlantis_sf <- whips_atlantis %>% rasterToPolygons(dissolve=TRUE) %>% st_as_sf(crs = crs(whips_atlantis)@projargs) %>% st_transform(crs = atlantis_crs)
+```
+
+Plot
+```{r}
+ggplot()+
+  geom_sf(data=whips_atlantis_sf,fill="green")+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(bounds$xmin,bounds$xmax),ylim=c(bounds$ymin,bounds$ymax))+
+  theme_minimal()+
+  labs(title="Whips presence")
+```
+
+# Overlay with Atlantis geometry
+
+```{r}
+bounds_box <- atlantis_box %>% st_bbox()
+
+ggplot()+
+  geom_sf(data=sponge_atlantis_sf,fill="green")+
+  geom_sf(data=atlantis_box,fill=NA)+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(bounds_box$xmin,bounds_box$xmax),ylim=c(bounds_box$ymin,bounds_box$ymax))+
+  theme_minimal()
+```
+
+Now we need to calculate the overlap of each box with the presence raster.
+```{r}
+sponge_intersection <- st_intersection(atlantis_box,sponge_atlantis_sf) %>% 
+  mutate(covered_area = st_area(geometry), sponge_goa = ifelse(.bx0>91,0,as.vector(covered_area/area))) %>%
+  select(.bx0,sponge_goa) %>%
+  st_set_geometry(NULL)
+
+coral_intersection <- st_intersection(atlantis_box,coral_atlantis_sf) %>% 
+  mutate(covered_area = st_area(geometry), coral_goa = ifelse(.bx0>91,0,as.vector(covered_area/area))) %>%
+  select(.bx0,coral_goa) %>%
+  st_set_geometry(NULL)
+
+whip_intersection <- st_intersection(atlantis_box,whips_atlantis_sf) %>% 
+  mutate(covered_area = st_area(geometry), whip_goa = ifelse(.bx0>91,0,as.vector(covered_area/area))) %>%
+  select(.bx0,whip_goa) %>%
+  st_set_geometry(NULL)
+
+atlantis_box <- atlantis_box %>% left_join(sponge_intersection,by='.bx0')
+atlantis_box <- atlantis_box %>% left_join(coral_intersection,by='.bx0')
+atlantis_box <- atlantis_box %>% left_join(whip_intersection,by='.bx0')
+
+# turn NAs to 0s, because NAs represent absence in this case, i.e. 0% of the box is covered
+atlantis_box[is.na(atlantis_box)] <- 0
+
+# now turn boundary boxes to NA
+atlantis_box <- atlantis_box %>% rowwise() %>% mutate(sponge_goa=ifelse(isTRUE(boundary),NA,sponge_goa),
+                                                      coral_goa=ifelse(isTRUE(boundary),NA,coral_goa),
+                                                      whip_goa=ifelse(isTRUE(boundary),NA,whip_goa)) %>%
+  ungroup()
+```
+
+Plot
+```{r}
+ggplot()+
+  geom_sf(data=atlantis_box[atlantis_box$.bx0<92,],aes(fill=sponge_goa))+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(bounds_box$xmin,bounds_box$xmax),ylim=c(bounds_box$ymin,bounds_box$ymax))+
+  scale_fill_viridis()+
+  theme_minimal()+
+  labs(title='Proportion of box area where sponges are present')
+
+ggplot()+
+  geom_sf(data=atlantis_box[atlantis_box$.bx0<92,],aes(fill=coral_goa))+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(bounds_box$xmin,bounds_box$xmax),ylim=c(bounds_box$ymin,bounds_box$ymax))+
+  scale_fill_viridis()+
+  theme_minimal()+
+  labs(title='Proportion of box area where corals are present')
+
+ggplot()+
+  geom_sf(data=atlantis_box[atlantis_box$.bx0<92,],aes(fill=whip_goa))+
+  geom_sf(data=coast_sf)+
+  coord_sf(xlim=c(bounds_box$xmin,bounds_box$xmax),ylim=c(bounds_box$ymin,bounds_box$ymax))+
+  scale_fill_viridis()+
+  theme_minimal()+
+  labs(title='Proportion of box area where sea whips are present')
+```
+
+# BC
+
+Data from Jackson Chu (Chu et al. 2019). The threshold values here are:
+
+* Glass sponges = 0.42
+* Demosponges = 0.38
+* Soft corals = 0.41
+* Stony coral = 0.38
+* Black corals = 0.31
+* Sea pens = 0.57
+
+Use the binary files. Reclassify them to turn zeroes to NAs, in order to turn it to a polygon layer if possible.
+
+Note that Alcyonacea are classified as "corals" in the Rooper papers, so here we will group them with "corals" too. We may have to make some regrouping for the biomasses when we actually parameterize the initial conditions.
+
+For consistency with the aggregation in the GOA, the rasters will be merged as follows:
+
+* Sponges = Glass sponges + demosponges
+* Corals = Stony coral + soft corals + black corals
+* Whips = Sea pens
+
+```{r}
+bc_files <- list.files("Biotic/BC",full.names = TRUE,recursive = TRUE)
+bc_binary_files <- bc_files[grep("binary",bc_files)]
+```
+
+We need to introduce a mask here, or things are too slow. Also we need to merge rasters, so let the function spit out rasters, merge them as appropriate, clip to a mask, and run another function for the polygonization and overlay to Atlantis.
+```{r}
+bc_list <- vector(mode = "list", length=length(bc_binary_files))
+
+raster_reclassifier <- function(bc_file){
+  bc_raster <- raster(bc_file)
+  bc_raster_rcl <- reclassify(bc_raster,rcl=matrix(c(0,NA),byrow=TRUE,nrow=1))
+  return(bc_raster_rcl)
+}
+
+bc_list <- lapply(bc_binary_files,raster_reclassifier)
+
+sponge_names <- c("demo.binary","glass.binary")
+coral_names <- c("stony.binary","black.binary","soft.binary")
+whips.names <- "seapens.binary"
+
+# merge rasters as appropriate
+
+sponge_bc <- raster::merge(bc_list[[which(unlist(lapply(bc_list,names))=="demo.binary")]],
+                           bc_list[[which(unlist(lapply(bc_list,names))=="glass.binary")]])
+names(sponge_bc) <- "sponge_bc"
+
+coral_bc <- raster::merge(bc_list[[which(unlist(lapply(bc_list,names))=="stony.binary")]],
+                          bc_list[[which(unlist(lapply(bc_list,names))=="black.binary")]],
+                           bc_list[[which(unlist(lapply(bc_list,names))=="soft.binary")]])
+names(coral_bc) <- "coral_bc"
+
+whips_bc <- bc_list[[which(unlist(lapply(bc_list,names))=="seapens.binary")]]
+names(whips_bc) <- "whip_bc"
+
+# clip these rasters to the GOA geometry mask, then polygonize. group them into a list
+
+bc_list <- list(sponge_bc,coral_bc,whips_bc)
+
+# make an empty list
+
+sf_list <- vector(mode = "list", length=length(bc_list))
+
+rasters_to_atlantis <- function(bc_raster){
+  organism <- names(bc_raster)
+  bc_raster <- bc_raster %>% projectRaster(crs=crs(atlantis_box)@projargs)
+  bc_masked <- mask(bc_raster, atlantis_box %>% filter(!boundary & .bx0>91 & botz<0))
+  bc_sf <- bc_masked %>% rasterToPolygons(dissolve=TRUE) %>%
+    st_as_sf(crs=crs(bc_masked)@projargs) %>%
+    st_transform(crs=atlantis_crs)
+  #intersect with Atlantis geom
+  bc_intersection <- st_intersection(atlantis_box,bc_sf) %>%
+    mutate(covered_area=st_area(geometry), prop_bc=as.vector(covered_area/area)) %>%
+    select(.bx0,prop_bc) %>%
+    rename(!!quo_name(organism):=prop_bc) %>%
+    st_set_geometry(NULL)
+  bc_intersection <- bc_intersection %>% filter(.bx0>91)
+  return(bc_intersection)
+}
+
+sf_list <- lapply(bc_list,rasters_to_atlantis)
+
+bc_frame <- do.call(cbind, sf_list) 
+bc_frame <- bc_frame[,!duplicated(names(bc_frame))]
+```
+
+# Merge GOA and BC
+
+This can be done in a couple of ways. We could merge the rasters, but the polygonization may take longer. So, we will keep it separate until here, and merge the percentage cover per box.
+```{r}
+atlantis_box <- atlantis_box %>% left_join(bc_frame,by='.bx0') %>% mutate(
+  across(c(sponge_goa:whip_bc), ~replace_na(.x, 0)) %>% mutate(sponge = sponge_goa+sponge_bc,
+                                                      coral = coral_goa+coral_bc,
+                                                      whip = whip_goa+whip_bc))
+
+# turn boundary boxes to NA
+atlantis_box <- atlantis_box %>% rowwise() %>% mutate(sponge=ifelse(isTRUE(boundary),NA,sponge),
+                                                      coral=ifelse(isTRUE(boundary),NA,coral),
+                                                      whip=ifelse(isTRUE(boundary),NA,whip)) %>%
+  ungroup()
+```
+
+Plot this. Have a look at BC first.
+```{r}
+bounds_bc <- atlantis_box %>% filter(.bx0>91) %>% st_bbox()
+
+ggplot()+
+  geom_sf(data=atlantis_box,aes(fill=sponge))+
+  geom_sf(data=coast_sf)+
+  scale_fill_viridis()+
+  coord_sf(xlim=c(bounds_bc$xmin,bounds_bc$xmax),ylim=c(bounds_bc$ymin,bounds_bc$ymax))+
+  theme_minimal()+
+  labs(title = "Sponges BC")
+
+ggplot()+
+  geom_sf(data=atlantis_box,aes(fill=coral))+
+  geom_sf(data=coast_sf)+
+  scale_fill_viridis()+
+  coord_sf(xlim=c(bounds_bc$xmin,bounds_bc$xmax),ylim=c(bounds_bc$ymin,bounds_bc$ymax))+
+  theme_minimal()+
+  labs(title = "Coral BC")
+
+ggplot()+
+  geom_sf(data=atlantis_box,aes(fill=whip))+
+  geom_sf(data=coast_sf)+
+  scale_fill_viridis()+
+  coord_sf(xlim=c(bounds_bc$xmin,bounds_bc$xmax),ylim=c(bounds_bc$ymin,bounds_bc$ymax))+
+  theme_minimal()+
+  labs(title = "Whip BC")
+```
+
+Plot entire model domain.
+```{r}
+ggplot()+
+  geom_sf(data=atlantis_box,aes(fill=sponge))+
+  geom_sf(data=coast_sf)+
+  scale_fill_viridis()+
+  coord_sf(xlim=c(bounds_box$xmin,bounds_box$xmax),ylim=c(bounds_box$ymin,bounds_box$ymax))+
+  theme_minimal()+
+  labs(title = "Sponges")
+
+ggplot()+
+  geom_sf(data=atlantis_box,aes(fill=coral))+
+  geom_sf(data=coast_sf)+
+  scale_fill_viridis()+
+  coord_sf(xlim=c(bounds_box$xmin,bounds_box$xmax),ylim=c(bounds_box$ymin,bounds_box$ymax))+
+  theme_minimal()+
+  labs(title = "Corals")
+
+ggplot()+
+  geom_sf(data=atlantis_box,aes(fill=whip))+
+  geom_sf(data=coast_sf)+
+  scale_fill_viridis()+
+  coord_sf(xlim=c(bounds_box$xmin,bounds_box$xmax),ylim=c(bounds_box$ymin,bounds_box$ymax))+
+  theme_minimal()+
+  labs(title = "Pennatulaceans")
+```
