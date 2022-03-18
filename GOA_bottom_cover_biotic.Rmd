@@ -30,7 +30,7 @@ This document opens raster of presence/absence and CPUE of benthic invertebrates
 
 # GOA and AI
 
-The goal here is to go from presence/absence to percent cover in an Atlantis box. This is an approximation, but is the best we have. As per Chris's recommendations, we use cut-off values to turn the propbability of presence (which is what we have in the data) to presence/absence. The cut-off values are the following (Rooper pers. comm.):
+The goal here is to go from presence/absence to percent cover in an Atlantis box. This is an approximation, but is the best we have. As per Chris's recommendations, we use cut-off values to turn the probability of presence (which is what we have in the data) to presence/absence. The cut-off values are the following (Rooper pers. comm.):
 
 * AI – Sponge = 0.57
 * AI – Coral = 0.360
@@ -306,10 +306,13 @@ bc_list <- list(sponge_bc,coral_bc,whips_bc)
 
 sf_list <- vector(mode = "list", length=length(bc_list))
 
+this_extent <- extent(st_bbox(atlantis_box)) # as of Marcg 2022 need an Extent object for raster::crop() instead of using raster::mask() with the `sf` object as we used to before
+
 rasters_to_atlantis <- function(bc_raster){
+
   organism <- names(bc_raster)
-  bc_raster <- bc_raster %>% projectRaster(crs=crs(atlantis_box)@projargs)
-  bc_masked <- mask(bc_raster, atlantis_box %>% filter(!boundary & .bx0>91 & botz<0))
+  bc_raster <- bc_raster %>% projectRaster(crs=atlantis_crs)
+  bc_masked <- crop(bc_raster, this_extent)
   bc_sf <- bc_masked %>% rasterToPolygons(dissolve=TRUE) %>%
     st_as_sf(crs=crs(bc_masked)@projargs) %>%
     st_transform(crs=atlantis_crs)
@@ -399,4 +402,18 @@ ggplot()+
   coord_sf(xlim=c(bounds_box$xmin,bounds_box$xmax),ylim=c(bounds_box$ymin,bounds_box$ymax))+
   theme_minimal()+
   labs(title = "Pennatulaceans")
+```
+What we have here is the proportion of a box where the organism is present, rather than the percent cover of the organism. That is, the numbers d not need to add up to 1 between the 3 organisms in the same box: we can have a box with 1 for corals, sponges, and sea whips. This case means that the three organisms are present everywhere in that box. Equally, we can have boxes where all of these are present in very small values.
+
+Cover of biotic organisms in Atlantis is not bound to 1, so this is not a big issue per se.
+
+Write out corals for S1-S4 purposes. Multiply cover by box area, then get proportions throughout the model domain to approximate S1-S4 values.
+```{r}
+atlantis_box %>% 
+  st_set_geometry(NULL) %>% 
+  select(box_id,area,coral) %>%
+  mutate(covered_area = coral*area,
+         prop = covered_area/sum(covered_area,na.rm = T)) %>%
+  select(box_id,prop) %>%
+  write.csv('output/coral_s1_s4.csv',row.names = F)
 ```
