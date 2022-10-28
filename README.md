@@ -1,4 +1,4 @@
-# GOA_bottom_cover
+# Building benthic habitats for Atlantis GOA
 
 This code estimates the proportional coverage of biotic and abiotic benthic habitats in Atlantis GOA, to be used for the biological parameterization. The code performs two tasks:
 
